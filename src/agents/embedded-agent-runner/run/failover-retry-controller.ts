@@ -408,9 +408,17 @@ export function createEmbeddedRunFailoverRetryController(input: {
       }
       rateLimitSeen ||= rateLimit;
       const retryCount = transientRetryCount;
+      // #retry-999 (teamclaw, 2026-11-15): an EXPLICIT provider retry budget
+      // from agent settings (retry.provider.maxRetries) is an operator
+      // instruction - the built-in rate-limit ceiling must not silently clamp
+      // it. The installed 2026.11.3 build capped every rate-limit storm at 9
+      // retries regardless of settings; operators stamped 999 into the agent
+      // scope and watched workers die at 9 anyway. Exempt explicit budgets;
+      // the unset-default path keeps the conservative built-in caps.
+      const hasExplicitBudget = transientRetryBudget !== undefined;
       const retryBudget = Math.min(
         transientRetryBudget ?? (rateLimit ? MAX_RATE_LIMIT_ATTEMPTS - 1 : MAX_TRANSIENT_RETRIES),
-        rateLimitSeen ? MAX_RATE_LIMIT_ATTEMPTS - 1 : Infinity,
+        hasExplicitBudget ? Infinity : rateLimitSeen ? MAX_RATE_LIMIT_ATTEMPTS - 1 : Infinity,
         sharedTpmFallback ? SHARED_TPM_FALLBACK_MAX_RETRIES : Infinity,
       );
       if (
