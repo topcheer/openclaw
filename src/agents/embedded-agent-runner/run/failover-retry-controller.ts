@@ -89,6 +89,27 @@ type RateLimitAuthProfileContext = {
   logFallbackDecision: (decision: "fallback_model", extra?: { status?: number }) => void;
 };
 
+/** Resolve the same-model transient retry budget for a run.
+ * #retry-999: an EXPLICIT budget (retry.provider.maxRetries from agent
+ * settings) is an operator instruction - the built-in rate-limit ceiling
+ * must not clamp it. The installed 2026.11.3 build capped every rate-limit
+ * storm at 9 regardless of settings; operators stamped 999 and watched
+ * workers die at 9 anyway. Unset budgets keep the conservative caps. */
+export function resolveTransientRetryBudget(input: {
+  transientRetryBudget: number | undefined;
+  rateLimit: boolean;
+  rateLimitSeen: boolean;
+  sharedTpmFallback: boolean;
+}): number {
+  const explicit = input.transientRetryBudget !== undefined;
+  return Math.min(
+    input.transientRetryBudget ??
+      (input.rateLimit ? MAX_RATE_LIMIT_ATTEMPTS - 1 : MAX_TRANSIENT_RETRIES),
+    explicit ? Infinity : input.rateLimitSeen ? MAX_RATE_LIMIT_ATTEMPTS - 1 : Infinity,
+    input.sharedTpmFallback ? SHARED_TPM_FALLBACK_MAX_RETRIES : Infinity,
+  );
+}
+
 export function createEmbeddedRunFailoverRetryController(input: {
   runInput: Pick<
     PreparedEmbeddedRunInput,
@@ -408,19 +429,12 @@ export function createEmbeddedRunFailoverRetryController(input: {
       }
       rateLimitSeen ||= rateLimit;
       const retryCount = transientRetryCount;
-      // #retry-999 (teamclaw, 2026-11-15): an EXPLICIT provider retry budget
-      // from agent settings (retry.provider.maxRetries) is an operator
-      // instruction - the built-in rate-limit ceiling must not silently clamp
-      // it. The installed 2026.11.3 build capped every rate-limit storm at 9
-      // retries regardless of settings; operators stamped 999 into the agent
-      // scope and watched workers die at 9 anyway. Exempt explicit budgets;
-      // the unset-default path keeps the conservative built-in caps.
-      const hasExplicitBudget = transientRetryBudget !== undefined;
-      const retryBudget = Math.min(
-        transientRetryBudget ?? (rateLimit ? MAX_RATE_LIMIT_ATTEMPTS - 1 : MAX_TRANSIENT_RETRIES),
-        hasExplicitBudget ? Infinity : rateLimitSeen ? MAX_RATE_LIMIT_ATTEMPTS - 1 : Infinity,
-        sharedTpmFallback ? SHARED_TPM_FALLBACK_MAX_RETRIES : Infinity,
-      );
+      const retryBudget = resolveTransientRetryBudget({
+        transientRetryBudget,
+        rateLimit,
+        rateLimitSeen,
+        sharedTpmFallback,
+      });
       if (
         retryCount >= retryBudget ||
         (retry.reason === "output_limit" && outputLimitRetryCount >= MAX_OUTPUT_LIMIT_RETRIES)
